@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import os
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -59,12 +61,22 @@ def find_ffmpeg() -> str | None:
     return shutil.which("ffmpeg")
 
 
-def convert_folder(source, ffmpeg, on_progress, cancel_event, optimize_covers=True):
+def convert_folder(
+    source,
+    ffmpeg,
+    on_progress,
+    cancel_event,
+    optimize_covers=True,
+    rename_flacs=True,
+    normalize_artists=True,
+):
     """Convert FLACs to 44.1 kHz / 16-bit and copy every other file.
 
     Subfolders are included. Zip files are extracted into the output folder
     and converted the same way. The source folder or archive is not modified.
     cover.jpg is resized only when optimize_covers is true.
+    FLAC files are renamed from track number and title when rename_flacs is true.
+    Artist tags are rewritten as "Artist1; Artist2" when normalize_artists is true.
     """
     source = os.path.abspath(source)
     if not _is_source(source):
@@ -88,6 +100,10 @@ def convert_folder(source, ffmpeg, on_progress, cancel_event, optimize_covers=Tr
         else:
             _collect_dir(source, destination, jobs, temp_dir, cancel_event, optimize_covers=optimize_covers)
         _label_jobs(destination, jobs)
+        used_destinations = {os.path.normcase(job["dest"]) for job in jobs if job.get("dest")}
+        ffprobe = _ffprobe_beside(ffmpeg) if rename_flacs else None
+        if rename_flacs and not ffprobe:
+            on_progress(0, 0, "Note: ffprobe was not found, so FLAC names were kept.")
 
         total = len(jobs)
         for index, job in enumerate(jobs, start=1):
@@ -100,8 +116,12 @@ def convert_folder(source, ffmpeg, on_progress, cancel_event, optimize_covers=Tr
                 if job["kind"] == "error":
                     raise RuntimeError(job["error"])
                 if job["kind"] == "flac":
+                    if rename_flacs:
+                        _apply_flac_name(job, job["path"], ffprobe, used_destinations, destination)
+                        label = job["label"]
                     os.makedirs(os.path.dirname(job["dest"]), exist_ok=True)
-                    _convert_flac(ffmpeg, job["path"], job["dest"], cancel_event)
+                    metadata = _artist_metadata_args(job["path"], ffmpeg) if normalize_artists else None
+                    _convert_flac(ffmpeg, job["path"], job["dest"], cancel_event, metadata)
                     converted += 1
                     on_progress(index, total, "Converted %s" % label)
                 elif job["kind"] == "cover":
@@ -124,9 +144,13 @@ def convert_folder(source, ffmpeg, on_progress, cancel_event, optimize_covers=Tr
                     on_progress(index, total, "Converted %s" % label)
                 elif job["kind"] == "zip-flac":
                     extracted = _extract_zip_member(job["zip_path"], job["member"], temp_dir)
-                    os.makedirs(os.path.dirname(job["dest"]), exist_ok=True)
                     try:
-                        _convert_flac(ffmpeg, extracted, job["dest"], cancel_event)
+                        if rename_flacs:
+                            _apply_flac_name(job, extracted, ffprobe, used_destinations, destination)
+                            label = job["label"]
+                        os.makedirs(os.path.dirname(job["dest"]), exist_ok=True)
+                        metadata = _artist_metadata_args(extracted, ffmpeg) if normalize_artists else None
+                        _convert_flac(ffmpeg, extracted, job["dest"], cancel_event, metadata)
                     finally:
                         if os.path.isfile(extracted):
                             os.remove(extracted)
@@ -368,6 +392,105 @@ def _is_inside(path, parent):
         return False
 
 
+def _ffprobe_beside(ffmpeg):
+    folder = os.path.dirname(os.path.abspath(ffmpeg))
+    candidate = os.path.join(folder, "ffprobe.exe")
+    if os.path.isfile(candidate):
+        return candidate
+    return shutil.which("ffprobe")
+
+
+def _apply_flac_name(job, source_path, ffprobe, used_destinations, output_root):
+    """Point a FLAC job at NN. Title.flac when both tags are present."""
+    filename = _flac_name_from_tags(source_path, ffprobe)
+    if not filename:
+        return
+    new_dest = _unique_dest(os.path.dirname(job["dest"]), filename, used_destinations, job["dest"])
+    old_key = os.path.normcase(job["dest"])
+    new_key = os.path.normcase(new_dest)
+    if new_key == old_key:
+        return
+    used_destinations.discard(old_key)
+    used_destinations.add(new_key)
+    job["dest"] = new_dest
+    try:
+        job["label"] = os.path.relpath(new_dest, output_root)
+    except ValueError:
+        job["label"] = os.path.basename(new_dest)
+
+
+def _unique_dest(directory, filename, used_destinations, current):
+    root, ext = os.path.splitext(filename)
+    candidate = os.path.join(directory, filename)
+    current_key = os.path.normcase(current)
+    number = 2
+    while True:
+        key = os.path.normcase(candidate)
+        if key == current_key or key not in used_destinations:
+            return candidate
+        candidate = os.path.join(directory, "%s (%d)%s" % (root, number, ext))
+        number += 1
+
+
+def _flac_name_from_tags(path, ffprobe):
+    if not ffprobe:
+        return None
+    command = [
+        ffprobe,
+        "-v",
+        "error",
+        "-show_entries",
+        "format_tags",
+        "-of",
+        "json",
+        path,
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            creationflags=CREATE_NO_WINDOW,
+            check=False,
+        )
+    except OSError:
+        return None
+    if completed.returncode != 0:
+        return None
+    try:
+        payload = json.loads(completed.stdout.decode("utf-8", errors="replace") or "{}")
+    except json.JSONDecodeError:
+        return None
+    tags = payload.get("format", {}).get("tags") or {}
+    folded = {str(key).lower(): value for key, value in tags.items()}
+    number = _parse_track_number(folded.get("tracknumber") or folded.get("track") or "")
+    title = _clean_track_title(folded.get("title") or "")
+    if number is None or not title:
+        return None
+    return "%02d. %s.flac" % (number, title)
+
+
+def _parse_track_number(value):
+    text = str(value).strip().split("/")[0].strip()
+    if not text.isdigit():
+        return None
+    number = int(text)
+    if number < 0 or number > 999:
+        return None
+    return number
+
+
+def _clean_track_title(value):
+    chars = []
+    for char in str(value).replace("\x00", ""):
+        if char in '<>:"/\\|?*' or ord(char) < 32:
+            chars.append(" ")
+        else:
+            chars.append(char)
+    title = " ".join("".join(chars).split()).strip(" .")
+    return title
+
+
 def _is_cover_jpg(name: str) -> bool:
     return os.path.basename(name).lower() == "cover.jpg"
 
@@ -401,7 +524,151 @@ def _to_rgb(image):
     return image.convert("RGB")
 
 
-def _convert_flac(ffmpeg, infile, outfile, cancel_event):
+_ARTIST_SEPARATOR = re.compile(
+    r"""
+    (?:
+        \s*;+\s* |
+        \s*\\+\s* |
+        \s*\|+\s* |
+        \s+/\s+ |
+        ,\s+ |
+        \s+(?:featuring|feat\.?|ft\.?|vs\.?|w/|x)\s+
+    )
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def _normalize_artist_list(value):
+    """Turn common multi-artist spellings into 'Artist1; Artist2'."""
+    parts = []
+    for part in _ARTIST_SEPARATOR.split(str(value)):
+        part = " ".join(part.split()).strip()
+        if part and part not in parts:
+            parts.append(part)
+    if len(parts) < 2:
+        return None
+    return "; ".join(parts)
+
+
+def _artist_tag_kind(key):
+    folded = key.replace(" ", "").replace("_", "").lower()
+    if folded in ("artist", "albumartist", "artists"):
+        return folded
+    return None
+
+
+def _read_ffmetadata(path, ffmpeg):
+    command = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        path,
+        "-f",
+        "ffmetadata",
+        "pipe:1",
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            creationflags=CREATE_NO_WINDOW,
+            check=False,
+        )
+    except OSError:
+        return []
+    if completed.returncode != 0:
+        return []
+    return _parse_ffmetadata(completed.stdout.decode("utf-8", errors="replace"))
+
+
+def _parse_ffmetadata(text):
+    logical = []
+    current = ""
+    for line in text.splitlines():
+        current = line if not current else current + "\n" + line
+        trailing = len(current) - len(current.rstrip("\\"))
+        if trailing % 2 == 1:
+            current = current[:-1]
+            continue
+        logical.append(current)
+        current = ""
+    if current:
+        logical.append(current)
+
+    entries = []
+    for line in logical:
+        if not line or line.startswith(";") or line.startswith("["):
+            continue
+        key, value = _split_ffmeta(line)
+        if key is None:
+            continue
+        entries.append((key, value))
+    return entries
+
+
+def _split_ffmeta(line):
+    escaped = False
+    for index, char in enumerate(line):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char == "=":
+            return line[:index], _unescape_ffmeta(line[index + 1 :])
+    return None, None
+
+
+def _unescape_ffmeta(value):
+    chars = []
+    index = 0
+    while index < len(value):
+        if value[index] == "\\" and index + 1 < len(value):
+            chars.append(value[index + 1])
+            index += 2
+        else:
+            chars.append(value[index])
+            index += 1
+    return "".join(chars)
+
+
+def _artist_metadata_args(path, ffmpeg):
+    grouped = {}
+    for key, value in _read_ffmetadata(path, ffmpeg):
+        kind = _artist_tag_kind(key)
+        if not kind:
+            continue
+        bucket = grouped.setdefault(kind, {"key": key, "values": []})
+        bucket["values"].append(value)
+
+    arguments = []
+    for bucket in grouped.values():
+        parts = []
+        for value in bucket["values"]:
+            split = _ARTIST_SEPARATOR.split(value)
+            pieces = [" ".join(piece.split()).strip() for piece in split]
+            pieces = [piece for piece in pieces if piece]
+            if not pieces:
+                continue
+            for piece in pieces:
+                if piece not in parts:
+                    parts.append(piece)
+        if len(parts) < 2:
+            continue
+        normalized = "; ".join(parts)
+        original = "; ".join(value.strip() for value in bucket["values"])
+        if normalized == original:
+            continue
+        arguments.extend(["-metadata", "%s=%s" % (bucket["key"], normalized)])
+    return arguments
+
+
+def _convert_flac(ffmpeg, infile, outfile, cancel_event, metadata_args=None):
     # Same flags as the shell script. -y avoids an overwrite prompt on a re-run.
     command = [
         ffmpeg,
@@ -419,8 +686,10 @@ def _convert_flac(ffmpeg, infile, outfile, cancel_event):
         "flac",
         "-map_metadata",
         "0",
-        outfile,
     ]
+    if metadata_args:
+        command.extend(metadata_args)
+    command.append(outfile)
     process = subprocess.Popen(
         command,
         stdout=subprocess.PIPE,
@@ -569,18 +838,31 @@ class App:
             buttons, text="Open output folder", command=self.open_destination, state="disabled"
         )
         self.open_button.pack(side="left", padx=(8, 0))
+
+        options = tk.Frame(self.root, bg="white")
+        options.pack(fill="x", padx=20, pady=(0, 4))
         self.cover_var = tk.BooleanVar(value=True)
         self._optimize_covers = True
         self.cover_var.trace_add("write", self._on_cover_toggle)
-        self.cover_check = tk.Checkbutton(
-            buttons,
-            text="Resize cover.jpg",
-            variable=self.cover_var,
-            bg="white",
-            activebackground="white",
-            font=("Segoe UI", 9),
-        )
-        self.cover_check.pack(side="right")
+        self.rename_var = tk.BooleanVar(value=True)
+        self._rename_flacs = True
+        self.rename_var.trace_add("write", self._on_rename_toggle)
+        self.artist_var = tk.BooleanVar(value=True)
+        self._normalize_artists = True
+        self.artist_var.trace_add("write", self._on_artist_toggle)
+        for text, variable in (
+            ("Optimize cover photo", self.cover_var),
+            ("Normalize file names", self.rename_var),
+            ("Normalize artist tags", self.artist_var),
+        ):
+            tk.Checkbutton(
+                options,
+                text=text,
+                variable=variable,
+                bg="white",
+                activebackground="white",
+                font=("Segoe UI", 9),
+            ).pack(side="left", padx=(0, 12))
 
         self.progress = ttk.Progressbar(self.root, mode="determinate")
         self.progress.pack(fill="x", padx=20, pady=(8, 0))
@@ -701,6 +983,8 @@ class App:
                     lambda done, total, message: self._events.put(("progress", done, total, message)),
                     self._cancel,
                     optimize_covers=self._optimize_covers,
+                    rename_flacs=self._rename_flacs,
+                    normalize_artists=self._normalize_artists,
                 )
                 self._events.put(("result", result))
             except Cancelled:
@@ -710,6 +994,12 @@ class App:
 
     def _on_cover_toggle(self, *_args):
         self._optimize_covers = bool(self.cover_var.get())
+
+    def _on_rename_toggle(self, *_args):
+        self._rename_flacs = bool(self.rename_var.get())
+
+    def _on_artist_toggle(self, *_args):
+        self._normalize_artists = bool(self.artist_var.get())
 
     def cancel(self):
         with self._wake:
@@ -767,7 +1057,7 @@ class App:
                     maximum = total if total else 1
                     self.progress.configure(maximum=maximum, value=min(done, maximum))
                     if message != "Done.":
-                        if message.startswith(("Converted ", "Copied ", "Failed:")):
+                        if message.startswith(("Converted ", "Copied ", "Failed:", "Note:")):
                             self._append_log(message)
                         shown = done if message.startswith(("Converted ", "Copied ", "Failed:")) else done + 1
                         self._set_status(
