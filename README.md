@@ -1,0 +1,31 @@
+# File Optimizer
+
+Drop folders or zip files onto the window. They are converted one at a time into a new folder named `originalName_optimized`. Originals are not changed.
+
+- FLAC files become 44.1 kHz / 16-bit FLAC, including files in subfolders and inside zip archives.
+- `cover.jpg` is resized to fit within 600×600 and saved as a baseline (non-progressive) JPEG.
+- Every other file is copied.
+
+The conversion uses ffmpeg. It must be on your PATH, or `ffmpeg.exe` must sit in the same folder as the program.
+
+## Build the .exe
+
+Use 64-bit Python 3.9, 3.10, 3.11, or 3.12 on Windows. Python 3.13 is not supported by the Pillow version in `requirements.txt`.
+
+From this folder:
+
+```powershell
+py -3.9 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\pyinstaller.exe --noconfirm --clean --onefile --windowed --name FileOptimizer --collect-all tkinterdnd2 file_optimizer.py
+```
+
+The program is written to `dist\FileOptimizer.exe`.
+
+Close File Optimizer before building again. If it is still open, PyInstaller cannot replace the exe.
+
+## Run from source
+
+```powershell
+.\.venv\Scripts\python.exe file_optimizer.py
+```
