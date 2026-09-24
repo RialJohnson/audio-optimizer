@@ -59,11 +59,12 @@ def find_ffmpeg() -> str | None:
     return shutil.which("ffmpeg")
 
 
-def convert_folder(source, ffmpeg, on_progress, cancel_event):
+def convert_folder(source, ffmpeg, on_progress, cancel_event, optimize_covers=True):
     """Convert FLACs to 44.1 kHz / 16-bit and copy every other file.
 
     Subfolders are included. Zip files are extracted into the output folder
     and converted the same way. The source folder or archive is not modified.
+    cover.jpg is resized only when optimize_covers is true.
     """
     source = os.path.abspath(source)
     if not _is_source(source):
@@ -83,9 +84,9 @@ def convert_folder(source, ffmpeg, on_progress, cancel_event):
         on_progress(0, 0, "Scanning…")
         jobs = []
         if _is_zip_file(source):
-            _collect_zip(source, destination, jobs, temp_dir, cancel_event)
+            _collect_zip(source, destination, jobs, temp_dir, cancel_event, optimize_covers=optimize_covers)
         else:
-            _collect_dir(source, destination, jobs, temp_dir, cancel_event)
+            _collect_dir(source, destination, jobs, temp_dir, cancel_event, optimize_covers=optimize_covers)
         _label_jobs(destination, jobs)
 
         total = len(jobs)
@@ -163,7 +164,7 @@ def convert_folder(source, ffmpeg, on_progress, cancel_event):
     }
 
 
-def _collect_dir(directory, dest_root, jobs, temp_dir, cancel_event):
+def _collect_dir(directory, dest_root, jobs, temp_dir, cancel_event, optimize_covers=True):
     if cancel_event.is_set():
         raise Cancelled()
 
@@ -186,10 +187,24 @@ def _collect_dir(directory, dest_root, jobs, temp_dir, cancel_event):
             jobs.append({"kind": "error", "label": entry.name, "error": str(exc), "dest": ""})
             continue
         if is_dir:
-            _collect_dir(entry.path, os.path.join(dest_root, entry.name), jobs, temp_dir, cancel_event)
+            _collect_dir(
+                entry.path,
+                os.path.join(dest_root, entry.name),
+                jobs,
+                temp_dir,
+                cancel_event,
+                optimize_covers=optimize_covers,
+            )
         elif is_file and entry.name.lower().endswith(".zip"):
             stem = os.path.splitext(entry.name)[0]
-            _collect_zip(entry.path, os.path.join(dest_root, stem), jobs, temp_dir, cancel_event)
+            _collect_zip(
+                entry.path,
+                os.path.join(dest_root, stem),
+                jobs,
+                temp_dir,
+                cancel_event,
+                optimize_covers=optimize_covers,
+            )
         elif is_file and entry.name.lower().endswith(".flac"):
             jobs.append({
                 "kind": "flac",
@@ -197,7 +212,7 @@ def _collect_dir(directory, dest_root, jobs, temp_dir, cancel_event):
                 "path": entry.path,
                 "dest": os.path.join(dest_root, entry.name),
             })
-        elif is_file and _is_cover_jpg(entry.name):
+        elif is_file and optimize_covers and _is_cover_jpg(entry.name):
             jobs.append({
                 "kind": "cover",
                 "label": entry.name,
@@ -213,7 +228,7 @@ def _collect_dir(directory, dest_root, jobs, temp_dir, cancel_event):
             })
 
 
-def _collect_zip(zip_path, dest_root, jobs, temp_dir, cancel_event, depth=0):
+def _collect_zip(zip_path, dest_root, jobs, temp_dir, cancel_event, depth=0, optimize_covers=True):
     if cancel_event.is_set():
         raise Cancelled()
     if depth > 8:
@@ -260,7 +275,15 @@ def _collect_zip(zip_path, dest_root, jobs, temp_dir, cancel_event, depth=0):
             if name.lower().endswith(".zip"):
                 nested_dest = os.path.join(dest_root, *parts[:-1], os.path.splitext(name)[0])
                 nested_path = _extract_zip_member(archive, info.filename, temp_dir)
-                _collect_zip(nested_path, nested_dest, jobs, temp_dir, cancel_event, depth + 1)
+                _collect_zip(
+                    nested_path,
+                    nested_dest,
+                    jobs,
+                    temp_dir,
+                    cancel_event,
+                    depth + 1,
+                    optimize_covers=optimize_covers,
+                )
             elif name.lower().endswith(".flac"):
                 jobs.append({
                     "kind": "zip-flac",
@@ -269,7 +292,7 @@ def _collect_zip(zip_path, dest_root, jobs, temp_dir, cancel_event, depth=0):
                     "member": info.filename,
                     "dest": dest,
                 })
-            elif _is_cover_jpg(name):
+            elif optimize_covers and _is_cover_jpg(name):
                 jobs.append({
                     "kind": "zip-cover",
                     "label": name,
@@ -467,7 +490,7 @@ class App:
         tk.Label(
             header,
             text=(
-                "Drop folders or zips. FLACs become 44.1 kHz / 16-bit. cover.jpg fits within 600×600.\n"
+                "Drop folders or zips. FLACs become 44.1 kHz / 16-bit. cover.jpg can be resized to 600×600.\n"
                 "They convert one at a time. Results go in a new folder ending in _optimized."
             ),
             font=("Segoe UI", 9),
@@ -546,6 +569,18 @@ class App:
             buttons, text="Open output folder", command=self.open_destination, state="disabled"
         )
         self.open_button.pack(side="left", padx=(8, 0))
+        self.cover_var = tk.BooleanVar(value=True)
+        self._optimize_covers = True
+        self.cover_var.trace_add("write", self._on_cover_toggle)
+        self.cover_check = tk.Checkbutton(
+            buttons,
+            text="Resize cover.jpg",
+            variable=self.cover_var,
+            bg="white",
+            activebackground="white",
+            font=("Segoe UI", 9),
+        )
+        self.cover_check.pack(side="right")
 
         self.progress = ttk.Progressbar(self.root, mode="determinate")
         self.progress.pack(fill="x", padx=20, pady=(8, 0))
@@ -665,12 +700,16 @@ class App:
                     self._ffmpeg,
                     lambda done, total, message: self._events.put(("progress", done, total, message)),
                     self._cancel,
+                    optimize_covers=self._optimize_covers,
                 )
                 self._events.put(("result", result))
             except Cancelled:
                 self._events.put(("cancelled", source))
             except Exception as exc:
                 self._events.put(("error", str(exc)))
+
+    def _on_cover_toggle(self, *_args):
+        self._optimize_covers = bool(self.cover_var.get())
 
     def cancel(self):
         with self._wake:

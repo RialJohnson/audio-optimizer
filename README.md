@@ -3,7 +3,7 @@
 Drop folders or zip files onto the window. They are converted one at a time into a new folder named `originalName_optimized`. Originals are not changed.
 
 - FLAC files become 44.1 kHz / 16-bit FLAC, including files in subfolders and inside zip archives.
-- `cover.jpg` is resized to fit within 600×600 and saved as a baseline (non-progressive) JPEG.
+- When **Resize cover.jpg** is checked (the default), `cover.jpg` is resized to fit within 600×600 and saved as a baseline (non-progressive) JPEG. Uncheck it to copy covers unchanged.
 - Every other file is copied.
 
 The conversion uses ffmpeg. It must be on your PATH, or `ffmpeg.exe` must sit in the same folder as the program.
