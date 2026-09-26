@@ -2,7 +2,7 @@
 
 Drop folders or zip files onto the window. They are converted one at a time into a new folder named `originalName_optimized`. Originals are not changed.
 
-- FLAC files become 44.1 kHz / 16-bit FLAC, including files in subfolders and inside zip archives. When **Normalize file names** is checked (the default), each file is saved as `01. Track Title.flac` using the track number and title. A file keeps its original name when either tag is missing.
+- FLAC files become 44.1 kHz / 16-bit FLAC, including files in subfolders and inside zip archives. When **Normalize file names** is checked (the default), each file is saved as `01. Track Title.flac` using the track number and title. A `.lrc` file with the same name is saved as `01. Track Title.lrc`. A file keeps its original name when either tag is missing.
 - When **Normalize artist tags** is checked (the default), multi-artist tags such as `Artist1;Artist2`, `Artist1\Artist2`, or `Artist1, Artist2` are rewritten as `Artist1; Artist2`.
 - When **Optimize cover photo** is checked (the default), `cover.jpg` is resized to fit within 600×600 and saved as a baseline (non-progressive) JPEG. Uncheck it to copy covers unchanged.
 - Every other file is copied.

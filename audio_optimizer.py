@@ -181,6 +181,7 @@ def convert_folder(
     and converted the same way. The source folder or archive is not modified.
     cover.jpg is resized only when optimize_covers is true.
     FLAC files are renamed from track number and title when rename_flacs is true.
+    A sidecar .lrc file with the same name is renamed to match.
     Artist tags are rewritten as "Artist1; Artist2" when normalize_artists is true.
     """
     source = os.path.abspath(source)
@@ -222,7 +223,7 @@ def convert_folder(
                     raise RuntimeError(job["error"])
                 if job["kind"] == "flac":
                     if rename_flacs:
-                        _apply_flac_name(job, job["path"], ffprobe, used_destinations, destination)
+                        _apply_flac_name(job, job["path"], ffprobe, used_destinations, destination, jobs)
                         label = job["label"]
                     os.makedirs(os.path.dirname(job["dest"]), exist_ok=True)
                     metadata = _artist_metadata_args(job["path"], ffmpeg) if normalize_artists else None
@@ -236,6 +237,7 @@ def convert_folder(
                 elif job["kind"] == "copy":
                     os.makedirs(os.path.dirname(job["dest"]), exist_ok=True)
                     shutil.copy2(job["path"], job["dest"])
+                    job["written"] = True
                     copied += 1
                     on_progress(index, total, "Copied %s" % label)
                 elif job["kind"] == "zip-cover":
@@ -251,7 +253,7 @@ def convert_folder(
                     extracted = _extract_zip_member(job["zip_path"], job["member"], temp_dir)
                     try:
                         if rename_flacs:
-                            _apply_flac_name(job, extracted, ffprobe, used_destinations, destination)
+                            _apply_flac_name(job, extracted, ffprobe, used_destinations, destination, jobs)
                             label = job["label"]
                         os.makedirs(os.path.dirname(job["dest"]), exist_ok=True)
                         metadata = _artist_metadata_args(extracted, ffmpeg) if normalize_artists else None
@@ -264,6 +266,7 @@ def convert_folder(
                 elif job["kind"] == "zip-copy":
                     os.makedirs(os.path.dirname(job["dest"]), exist_ok=True)
                     _extract_zip_member(job["zip_path"], job["member"], job["dest"])
+                    job["written"] = True
                     copied += 1
                     on_progress(index, total, "Copied %s" % label)
                 else:
@@ -512,23 +515,58 @@ def _ffprobe_beside(ffmpeg):
     return shutil.which("ffprobe")
 
 
-def _apply_flac_name(job, source_path, ffprobe, used_destinations, output_root):
+def _apply_flac_name(job, source_path, ffprobe, used_destinations, output_root, jobs):
     """Point a FLAC job at NN. Title.flac when both tags are present."""
     filename = _flac_name_from_tags(source_path, ffprobe)
     if not filename:
         return
-    new_dest = _unique_dest(os.path.dirname(job["dest"]), filename, used_destinations, job["dest"])
-    old_key = os.path.normcase(job["dest"])
+    old_dest = job["dest"]
+    new_dest = _unique_dest(os.path.dirname(old_dest), filename, used_destinations, old_dest)
+    old_key = os.path.normcase(old_dest)
     new_key = os.path.normcase(new_dest)
     if new_key == old_key:
         return
     used_destinations.discard(old_key)
     used_destinations.add(new_key)
     job["dest"] = new_dest
+    _set_job_label(job, new_dest, output_root)
+    _retarget_matching_lyrics(jobs, old_dest, new_dest, used_destinations, output_root)
+
+
+def _retarget_matching_lyrics(jobs, old_flac_dest, new_flac_dest, used_destinations, output_root):
+    """Rename a sidecar .lrc that shares the FLAC's original base name."""
+    directory = os.path.dirname(old_flac_dest)
+    old_stem = os.path.splitext(os.path.basename(old_flac_dest))[0]
+    new_stem = os.path.splitext(os.path.basename(new_flac_dest))[0]
+    if os.path.normcase(old_stem) == os.path.normcase(new_stem):
+        return
+    for job in jobs:
+        if job.get("kind") not in ("copy", "zip-copy"):
+            continue
+        dest = job.get("dest") or ""
+        if os.path.normcase(os.path.dirname(dest)) != os.path.normcase(directory):
+            continue
+        stem, ext = os.path.splitext(os.path.basename(dest))
+        if ext.lower() != ".lrc" or os.path.normcase(stem) != os.path.normcase(old_stem):
+            continue
+        new_dest = _unique_dest(os.path.dirname(dest), new_stem + ext, used_destinations, dest)
+        old_key = os.path.normcase(dest)
+        new_key = os.path.normcase(new_dest)
+        if new_key == old_key:
+            continue
+        if job.get("written") and os.path.isfile(dest):
+            os.replace(dest, new_dest)
+        used_destinations.discard(old_key)
+        used_destinations.add(new_key)
+        job["dest"] = new_dest
+        _set_job_label(job, new_dest, output_root)
+
+
+def _set_job_label(job, dest, output_root):
     try:
-        job["label"] = os.path.relpath(new_dest, output_root)
+        job["label"] = os.path.relpath(dest, output_root)
     except ValueError:
-        job["label"] = os.path.basename(new_dest)
+        job["label"] = os.path.basename(dest)
 
 
 def _unique_dest(directory, filename, used_destinations, current):
