@@ -1,4 +1,4 @@
-# File Optimizer
+# Audio Optimizer
 
 Drop folders or zip files onto the window. They are converted one at a time into a new folder named `originalName_optimized`. Originals are not changed.
 
@@ -18,15 +18,15 @@ From this folder:
 ```powershell
 py -3.9 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\pyinstaller.exe --noconfirm --clean --onefile --windowed --name FileOptimizer --collect-all tkinterdnd2 file_optimizer.py
+.\.venv\Scripts\pyinstaller.exe --noconfirm --clean --onefile --windowed --name AudioOptimizer --collect-all tkinterdnd2 audio_optimizer.py
 ```
 
-The program is written to `dist\FileOptimizer.exe`.
+The program is written to `dist\AudioOptimizer.exe`.
 
-Close File Optimizer before building again. If it is still open, PyInstaller cannot replace the exe.
+Close Audio Optimizer before building again. If it is still open, PyInstaller cannot replace the exe.
 
 ## Run from source
 
 ```powershell
-.\.venv\Scripts\python.exe file_optimizer.py
+.\.venv\Scripts\python.exe audio_optimizer.py
 ```
