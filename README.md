@@ -8,26 +8,56 @@ Drop folders or zip files onto the window. They are converted one at a time into
 - When **Optimize cover photo** is checked (the default), `cover.jpg` is resized to fit within 600×600 and saved as a baseline (non-progressive) JPEG. Uncheck it to copy covers unchanged.
 - Every other file is copied.
 
-The conversion uses ffmpeg. It must be on your PATH, or `ffmpeg.exe` must sit in the same folder as the program.
+The conversion uses ffmpeg. It must be on your PATH, or the `ffmpeg` program must sit in the same folder as Audio Optimizer. On Windows that file is named `ffmpeg.exe`.
 
-## Build the .exe
+## Build
 
-Use 64-bit Python 3.9, 3.10, 3.11, or 3.12 on Windows. Python 3.13 is not supported by the Pillow version in `requirements.txt`.
+Use 64-bit Python 3.9, 3.10, 3.11, or 3.12. Python 3.13 is not supported by the Pillow version in `requirements.txt`.
+
+Close Audio Optimizer before building again. If it is still open, the build cannot replace the program.
+
+### Windows
+
+Install [Python](https://www.python.org/downloads/windows/) and [ffmpeg](https://ffmpeg.org/download.html). ffmpeg must be on your PATH when you run the program, or `ffmpeg.exe` must sit next to `AudioOptimizer.exe`.
 
 From this folder:
 
 ```powershell
 py -3.9 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\pyinstaller.exe --noconfirm --clean --onefile --windowed --name AudioOptimizer --icon icon.ico --add-data "icon.png;." --add-data "icon.ico;." --collect-all tkinterdnd2 audio_optimizer.py
+.\.venv\Scripts\python.exe build.py
 ```
 
 The program is written to `dist\AudioOptimizer.exe`.
 
-Close Audio Optimizer before building again. If it is still open, PyInstaller cannot replace the exe.
+### Linux
+
+Install Python, Tk, and ffmpeg. On Debian or Ubuntu:
+
+```bash
+sudo apt install python3 python3-venv python3-tk python3-pip ffmpeg
+```
+
+From this folder:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python build.py
+```
+
+The program is written to `dist/AudioOptimizer`. Run it with `./dist/AudioOptimizer`.
 
 ## Run from source
 
+Windows:
+
 ```powershell
 .\.venv\Scripts\python.exe audio_optimizer.py
+```
+
+Linux:
+
+```bash
+.venv/bin/python audio_optimizer.py
 ```
