@@ -24,7 +24,8 @@ except ImportError:  # Drag-and-drop is optional so the window still opens.
     DND_FILES = None
     TkinterDnD = None
 
-CREATE_NO_WINDOW = 0x08000000
+# Hide the console window ffmpeg would open on Windows. Linux has no equivalent flag.
+_SUBPROCESS_KWARGS = {"creationflags": 0x08000000} if sys.platform == "win32" else {}
 COVER_MAX_EDGE = 600
 
 
@@ -36,6 +37,13 @@ def _app_dir():
     if getattr(sys, "frozen", False):
         return getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
     return os.path.dirname(os.path.abspath(__file__))
+
+
+def _open_folder(path):
+    if sys.platform == "win32":
+        os.startfile(path)
+        return
+    subprocess.Popen(["xdg-open", path], **_SUBPROCESS_KWARGS)
 
 
 def destination_for(source: str) -> str:
@@ -239,18 +247,23 @@ def _is_source(path: str) -> bool:
     return os.path.isdir(path) or _is_zip_file(path)
 
 
-def find_ffmpeg() -> str | None:
-    candidates = []
+def _program_beside(stem):
+    """Find stem next to this program, then on PATH. Windows also checks stem.exe."""
+    names = [stem + ".exe", stem] if sys.platform == "win32" else [stem]
+    directories = []
     if getattr(sys, "frozen", False):
-        candidates.append(os.path.dirname(sys.executable))
-    candidates.append(os.path.dirname(os.path.abspath(__file__)))
+        directories.append(os.path.dirname(sys.executable))
+    directories.append(os.path.dirname(os.path.abspath(__file__)))
+    for directory in directories:
+        for name in names:
+            path = os.path.join(directory, name)
+            if os.path.isfile(path) and os.access(path, os.X_OK):
+                return path
+    return shutil.which(stem)
 
-    for directory in candidates:
-        path = os.path.join(directory, "ffmpeg.exe")
-        if os.path.isfile(path):
-            return path
 
-    return shutil.which("ffmpeg")
+def find_ffmpeg() -> str | None:
+    return _program_beside("ffmpeg")
 
 
 def convert_folder(
@@ -633,9 +646,11 @@ def _is_inside(path, parent):
 
 def _ffprobe_beside(ffmpeg):
     folder = os.path.dirname(os.path.abspath(ffmpeg))
-    candidate = os.path.join(folder, "ffprobe.exe")
-    if os.path.isfile(candidate):
-        return candidate
+    names = ["ffprobe.exe", "ffprobe"] if sys.platform == "win32" else ["ffprobe"]
+    for name in names:
+        candidate = os.path.join(folder, name)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
     return shutil.which("ffprobe")
 
 
@@ -727,7 +742,7 @@ def _flac_name_from_tags(path, ffprobe, extension):
             command,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            creationflags=CREATE_NO_WINDOW,
+            **_SUBPROCESS_KWARGS,
             check=False,
         )
     except OSError:
@@ -852,7 +867,7 @@ def _read_ffmetadata(path, ffmpeg):
             command,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            creationflags=CREATE_NO_WINDOW,
+            **_SUBPROCESS_KWARGS,
             check=False,
         )
     except OSError:
@@ -1039,7 +1054,7 @@ def _ffprobe_bitrate_kbps(path, ffprobe):
             command,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            creationflags=CREATE_NO_WINDOW,
+            **_SUBPROCESS_KWARGS,
             check=False,
         )
     except OSError:
@@ -1079,7 +1094,7 @@ def _ffmpeg_bitrate_kbps(path, ffmpeg):
             command,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            creationflags=CREATE_NO_WINDOW,
+            **_SUBPROCESS_KWARGS,
             check=False,
         )
     except OSError:
@@ -1145,7 +1160,7 @@ def _run_ffmpeg(command, cancel_event):
         command,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        creationflags=CREATE_NO_WINDOW,
+        **_SUBPROCESS_KWARGS,
     )
     while True:
         try:
@@ -1202,7 +1217,7 @@ class App:
         base = _app_dir()
         ico = os.path.join(base, "icon.ico")
         png = os.path.join(base, "icon.png")
-        if os.path.isfile(ico):
+        if sys.platform == "win32" and os.path.isfile(ico):
             try:
                 self.root.iconbitmap(default=ico)
             except tk.TclError:
@@ -1404,8 +1419,8 @@ class App:
         if not ffmpeg:
             messagebox.showwarning(
                 "Audio Optimizer",
-                "ffmpeg.exe was not found. Install ffmpeg and add it to PATH, "
-                "or place ffmpeg.exe in the same folder as this program.",
+                "ffmpeg was not found. Install ffmpeg and add it to PATH, "
+                "or place ffmpeg in the same folder as this program.",
             )
             return
         self._ffmpeg = ffmpeg
@@ -1495,7 +1510,7 @@ class App:
 
     def open_destination(self):
         if self._destination and os.path.isdir(self._destination):
-            os.startfile(self._destination)
+            _open_folder(self._destination)
 
     def _on_drop(self, event):
         self._set_drag_over(False)
