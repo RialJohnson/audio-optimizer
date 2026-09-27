@@ -1,6 +1,6 @@
 # Audio Optimizer
 
-Drop folders or zip files onto the window. They are converted one at a time into a new folder named `originalName_optimized`. Originals are not changed.
+Drop folders or zip files onto the window. They are converted one at a time into `originalName_optimized`. Inside that folder, files are placed in `year - album name` using the first song that has both an album name and a release year. If no song has those tags, the inner folder keeps the original folder name. Originals are not changed.
 
 - Choose **CD Quality FLAC (44/16)** (the default) or **High Quality MP3 (320kbs)**. FLAC sources become 44.1 kHz / 16-bit FLAC, or 320 kbps MP3 when that option is selected. An MP3 source is always written as MP3 and is never converted to FLAC. Its bitrate stays at the highest standard rate that does not exceed the source, up to 320 kbps.
 - Files in subfolders and zip archives are included. When **Normalize file names** is checked (the default), each audio file is saved as `01. Track Title` plus `.flac` or `.mp3`, using the track number and title. A `.lrc` file with the same name is renamed to match. A file keeps its original name when either tag is missing.

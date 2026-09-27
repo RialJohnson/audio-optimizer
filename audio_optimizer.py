@@ -39,6 +39,87 @@ def destination_for(source: str) -> str:
     return source.rstrip("\\/") + "_optimized"
 
 
+def _original_folder_name(source):
+    source = os.path.abspath(source)
+    if _is_zip_file(source):
+        source = os.path.splitext(source)[0]
+    return os.path.basename(source.rstrip("\\/"))
+
+
+def _place_album_folder(source, destination, jobs, temp_dir, ffmpeg, cancel_event):
+    """Move every output path under year - album, or the original folder name."""
+    internal = _album_folder_name(source, destination, jobs, temp_dir, ffmpeg, cancel_event)
+    root = os.path.join(destination, internal)
+    for job in jobs:
+        dest = job.get("dest") or ""
+        if not dest:
+            continue
+        relative = os.path.relpath(dest, destination)
+        if relative.startswith(".."):
+            continue
+        job["dest"] = os.path.join(root, relative)
+
+
+def _album_folder_name(source, destination, jobs, temp_dir, ffmpeg, cancel_event):
+    fallback = _original_folder_name(source)
+    root_songs = []
+    nested_songs = []
+    for job in jobs:
+        if job.get("kind") not in ("flac", "mp3", "zip-flac", "zip-mp3"):
+            continue
+        dest = job.get("dest") or ""
+        relative = os.path.relpath(dest, destination) if dest else ""
+        if os.path.dirname(relative) in ("", "."):
+            root_songs.append(job)
+        else:
+            nested_songs.append(job)
+    # Songs in this folder decide the name. Nested songs are used only when
+    # the folder itself has no audio files.
+    search = root_songs or nested_songs
+    for job in search:
+        if cancel_event.is_set():
+            raise Cancelled()
+        path = job.get("path")
+        extracted = None
+        if not path:
+            extracted = _extract_zip_member(job["zip_path"], job["member"], temp_dir)
+            path = extracted
+        try:
+            named = _album_folder_from_tags(path, ffmpeg)
+        finally:
+            if extracted and os.path.isfile(extracted):
+                os.remove(extracted)
+        if named:
+            return named
+    return fallback
+
+
+def _album_folder_from_tags(path, ffmpeg):
+    """Return 'year - album' when both tags are present."""
+    tags = {}
+    for key, value in _read_ffmetadata(path, ffmpeg):
+        tags.setdefault(str(key).replace(" ", "").replace("_", "").lower(), value)
+    year = None
+    for key in ("date", "year", "originaldate", "originalyear"):
+        year = _parse_year(tags.get(key) or "")
+        if year:
+            break
+    album = _clean_track_title(tags.get("album") or "")
+    if not year or not album:
+        return None
+    return _clean_track_title("%s - %s" % (year, album))
+
+
+def _parse_year(value):
+    match = re.match(r"\s*(\d{4})\b", str(value))
+    if not match:
+        return None
+    year = int(match.group(1))
+    if year < 1000 or year > 9999:
+        return None
+    return "%04d" % year
+
+
 def _is_zip_file(path: str) -> bool:
     return os.path.isfile(path) and path.lower().endswith(".zip")
 
@@ -182,6 +263,8 @@ def convert_folder(
     and converted the same way. The source folder or archive is not modified.
     output_format "flac" writes 44.1 kHz / 16-bit FLAC. "mp3" writes 320 kbps MP3.
     An MP3 source is always written as MP3, capped at 320 kbps, even when output_format is flac.
+    Files land in originalName_optimized / "year - album", using the first song that has both tags.
+    When no song has them, the inner folder keeps the original folder name.
     cover.jpg is resized only when optimize_covers is true.
     Audio files are renamed from track number and title when rename_flacs is true.
     A sidecar .lrc file with the same name is renamed to match.
@@ -208,6 +291,7 @@ def convert_folder(
             _collect_zip(source, destination, jobs, temp_dir, cancel_event, optimize_covers=optimize_covers)
         else:
             _collect_dir(source, destination, jobs, temp_dir, cancel_event, optimize_covers=optimize_covers)
+        _place_album_folder(source, destination, jobs, temp_dir, ffmpeg, cancel_event)
         _label_jobs(destination, jobs)
         used_destinations = {os.path.normcase(job["dest"]) for job in jobs if job.get("dest")}
         ffprobe = _ffprobe_beside(ffmpeg)
@@ -1123,7 +1207,7 @@ class App:
             text=(
                 "Drop folders or zips. Choose CD-quality FLAC or 320 kbps MP3.\n"
                 "They convert one at a time. cover.jpg can be resized to 600×600.\n"
-                "Results go in a new folder ending in _optimized."
+                "Results go in originalName_optimized / year - album name."
             ),
             font=("Segoe UI", 9),
             bg="white",
