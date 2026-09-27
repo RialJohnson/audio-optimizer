@@ -19,7 +19,7 @@ From this folder:
 ```powershell
 py -3.9 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\pyinstaller.exe --noconfirm --clean --onefile --windowed --name AudioOptimizer --collect-all tkinterdnd2 audio_optimizer.py
+.\.venv\Scripts\pyinstaller.exe --noconfirm --clean --onefile --windowed --name AudioOptimizer --icon icon.ico --add-data "icon.png;." --add-data "icon.ico;." --collect-all tkinterdnd2 audio_optimizer.py
 ```
 
 The program is written to `dist\AudioOptimizer.exe`.

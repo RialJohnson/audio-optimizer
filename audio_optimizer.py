@@ -32,6 +32,12 @@ class Cancelled(Exception):
     pass
 
 
+def _app_dir():
+    if getattr(sys, "frozen", False):
+        return getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
 def destination_for(source: str) -> str:
     source = os.path.abspath(source)
     if _is_zip_file(source):
@@ -1171,6 +1177,7 @@ class App:
         self.root.geometry("680x700")
         self.root.minsize(560, 560)
         self.root.configure(bg="white")
+        self._set_window_icon()
 
         self._events = queue.Queue()
         self._pending = deque()
@@ -1190,6 +1197,22 @@ class App:
         initial = [arg for arg in sys.argv[1:] if _is_source(arg)]
         if initial:
             self.root.after(200, lambda: self.enqueue(initial))
+
+    def _set_window_icon(self):
+        base = _app_dir()
+        ico = os.path.join(base, "icon.ico")
+        png = os.path.join(base, "icon.png")
+        if os.path.isfile(ico):
+            try:
+                self.root.iconbitmap(default=ico)
+            except tk.TclError:
+                pass
+        if os.path.isfile(png):
+            try:
+                self._icon_image = tk.PhotoImage(file=png)
+                self.root.iconphoto(True, self._icon_image)
+            except tk.TclError:
+                self._icon_image = None
 
     def _build(self):
         header = tk.Frame(self.root, bg="white")
