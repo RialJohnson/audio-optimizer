@@ -1,4 +1,4 @@
-"""Convert FLAC files to CD quality without touching the originals."""
+"""Convert audio to CD-quality FLAC or 320 kbps MP3 without touching the originals."""
 
 from __future__ import annotations
 
@@ -32,11 +32,98 @@ class Cancelled(Exception):
     pass
 
 
+def _app_dir():
+    if getattr(sys, "frozen", False):
+        return getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
 def destination_for(source: str) -> str:
     source = os.path.abspath(source)
     if _is_zip_file(source):
         source = os.path.splitext(source)[0]
     return source.rstrip("\\/") + "_optimized"
+
+
+def _original_folder_name(source):
+    source = os.path.abspath(source)
+    if _is_zip_file(source):
+        source = os.path.splitext(source)[0]
+    return os.path.basename(source.rstrip("\\/"))
+
+
+def _place_album_folder(source, destination, jobs, temp_dir, ffmpeg, cancel_event):
+    """Move every output path under year - album, or the original folder name."""
+    internal = _album_folder_name(source, destination, jobs, temp_dir, ffmpeg, cancel_event)
+    root = os.path.join(destination, internal)
+    for job in jobs:
+        dest = job.get("dest") or ""
+        if not dest:
+            continue
+        relative = os.path.relpath(dest, destination)
+        if relative.startswith(".."):
+            continue
+        job["dest"] = os.path.join(root, relative)
+
+
+def _album_folder_name(source, destination, jobs, temp_dir, ffmpeg, cancel_event):
+    fallback = _original_folder_name(source)
+    root_songs = []
+    nested_songs = []
+    for job in jobs:
+        if job.get("kind") not in ("flac", "mp3", "zip-flac", "zip-mp3"):
+            continue
+        dest = job.get("dest") or ""
+        relative = os.path.relpath(dest, destination) if dest else ""
+        if os.path.dirname(relative) in ("", "."):
+            root_songs.append(job)
+        else:
+            nested_songs.append(job)
+    # Songs in this folder decide the name. Nested songs are used only when
+    # the folder itself has no audio files.
+    search = root_songs or nested_songs
+    for job in search:
+        if cancel_event.is_set():
+            raise Cancelled()
+        path = job.get("path")
+        extracted = None
+        if not path:
+            extracted = _extract_zip_member(job["zip_path"], job["member"], temp_dir)
+            path = extracted
+        try:
+            named = _album_folder_from_tags(path, ffmpeg)
+        finally:
+            if extracted and os.path.isfile(extracted):
+                os.remove(extracted)
+        if named:
+            return named
+    return fallback
+
+
+def _album_folder_from_tags(path, ffmpeg):
+    """Return 'year - album' when both tags are present."""
+    tags = {}
+    for key, value in _read_ffmetadata(path, ffmpeg):
+        tags.setdefault(str(key).replace(" ", "").replace("_", "").lower(), value)
+    year = None
+    for key in ("date", "year", "originaldate", "originalyear"):
+        year = _parse_year(tags.get(key) or "")
+        if year:
+            break
+    album = _clean_track_title(tags.get("album") or "")
+    if not year or not album:
+        return None
+    return _clean_track_title("%s - %s" % (year, album))
+
+
+def _parse_year(value):
+    match = re.match(r"\s*(\d{4})\b", str(value))
+    if not match:
+        return None
+    year = int(match.group(1))
+    if year < 1000 or year > 9999:
+        return None
+    return "%04d" % year
 
 
 def _is_zip_file(path: str) -> bool:
@@ -174,13 +261,19 @@ def convert_folder(
     optimize_covers=True,
     rename_flacs=True,
     normalize_artists=True,
+    output_format="flac",
 ):
-    """Convert FLACs to 44.1 kHz / 16-bit and copy every other file.
+    """Convert audio and copy every other file.
 
     Subfolders are included. Zip files are extracted into the output folder
     and converted the same way. The source folder or archive is not modified.
+    output_format "flac" writes 44.1 kHz / 16-bit FLAC. "mp3" writes 320 kbps MP3.
+    An MP3 source is always written as MP3, capped at 320 kbps, even when output_format is flac.
+    Files land in originalName_optimized / "year - album", using the first song that has both tags.
+    When no song has them, the inner folder keeps the original folder name.
     cover.jpg is resized only when optimize_covers is true.
-    FLAC files are renamed from track number and title when rename_flacs is true.
+    Audio files are renamed from track number and title when rename_flacs is true.
+    A sidecar .lrc file with the same name is renamed to match.
     Artist tags are rewritten as "Artist1; Artist2" when normalize_artists is true.
     """
     source = os.path.abspath(source)
@@ -204,9 +297,10 @@ def convert_folder(
             _collect_zip(source, destination, jobs, temp_dir, cancel_event, optimize_covers=optimize_covers)
         else:
             _collect_dir(source, destination, jobs, temp_dir, cancel_event, optimize_covers=optimize_covers)
+        _place_album_folder(source, destination, jobs, temp_dir, ffmpeg, cancel_event)
         _label_jobs(destination, jobs)
         used_destinations = {os.path.normcase(job["dest"]) for job in jobs if job.get("dest")}
-        ffprobe = _ffprobe_beside(ffmpeg) if rename_flacs else None
+        ffprobe = _ffprobe_beside(ffmpeg)
         if rename_flacs and not ffprobe:
             on_progress(0, 0, "Note: ffprobe was not found, so FLAC names were kept.")
 
@@ -220,13 +314,21 @@ def convert_folder(
             try:
                 if job["kind"] == "error":
                     raise RuntimeError(job["error"])
-                if job["kind"] == "flac":
-                    if rename_flacs:
-                        _apply_flac_name(job, job["path"], ffprobe, used_destinations, destination)
-                        label = job["label"]
-                    os.makedirs(os.path.dirname(job["dest"]), exist_ok=True)
-                    metadata = _artist_metadata_args(job["path"], ffmpeg) if normalize_artists else None
-                    _convert_flac(ffmpeg, job["path"], job["dest"], cancel_event, metadata)
+                if job["kind"] in ("flac", "mp3"):
+                    _convert_audio_job(
+                        job,
+                        job["path"],
+                        ffmpeg,
+                        ffprobe,
+                        used_destinations,
+                        destination,
+                        jobs,
+                        cancel_event,
+                        rename_flacs=rename_flacs,
+                        normalize_artists=normalize_artists,
+                        output_format=output_format,
+                    )
+                    label = job["label"]
                     converted += 1
                     on_progress(index, total, "Converted %s" % label)
                 elif job["kind"] == "cover":
@@ -236,6 +338,7 @@ def convert_folder(
                 elif job["kind"] == "copy":
                     os.makedirs(os.path.dirname(job["dest"]), exist_ok=True)
                     shutil.copy2(job["path"], job["dest"])
+                    job["written"] = True
                     copied += 1
                     on_progress(index, total, "Copied %s" % label)
                 elif job["kind"] == "zip-cover":
@@ -247,15 +350,23 @@ def convert_folder(
                             os.remove(extracted)
                     covers += 1
                     on_progress(index, total, "Converted %s" % label)
-                elif job["kind"] == "zip-flac":
+                elif job["kind"] in ("zip-flac", "zip-mp3"):
                     extracted = _extract_zip_member(job["zip_path"], job["member"], temp_dir)
                     try:
-                        if rename_flacs:
-                            _apply_flac_name(job, extracted, ffprobe, used_destinations, destination)
-                            label = job["label"]
-                        os.makedirs(os.path.dirname(job["dest"]), exist_ok=True)
-                        metadata = _artist_metadata_args(extracted, ffmpeg) if normalize_artists else None
-                        _convert_flac(ffmpeg, extracted, job["dest"], cancel_event, metadata)
+                        _convert_audio_job(
+                            job,
+                            extracted,
+                            ffmpeg,
+                            ffprobe,
+                            used_destinations,
+                            destination,
+                            jobs,
+                            cancel_event,
+                            rename_flacs=rename_flacs,
+                            normalize_artists=normalize_artists,
+                            output_format=output_format,
+                        )
+                        label = job["label"]
                     finally:
                         if os.path.isfile(extracted):
                             os.remove(extracted)
@@ -264,6 +375,7 @@ def convert_folder(
                 elif job["kind"] == "zip-copy":
                     os.makedirs(os.path.dirname(job["dest"]), exist_ok=True)
                     _extract_zip_member(job["zip_path"], job["member"], job["dest"])
+                    job["written"] = True
                     copied += 1
                     on_progress(index, total, "Copied %s" % label)
                 else:
@@ -348,6 +460,13 @@ def _collect_dir(directory, dest_root, jobs, temp_dir, cancel_event, optimize_co
                 "path": entry.path,
                 "dest": os.path.join(dest_root, entry.name),
             })
+        elif is_file and entry.name.lower().endswith(".mp3"):
+            jobs.append({
+                "kind": "mp3",
+                "label": entry.name,
+                "path": entry.path,
+                "dest": os.path.join(dest_root, entry.name),
+            })
         elif is_file and optimize_covers and _is_cover_jpg(entry.name):
             jobs.append({
                 "kind": "cover",
@@ -423,6 +542,14 @@ def _collect_zip(zip_path, dest_root, jobs, temp_dir, cancel_event, depth=0, opt
             elif name.lower().endswith(".flac"):
                 jobs.append({
                     "kind": "zip-flac",
+                    "label": name,
+                    "zip_path": zip_path,
+                    "member": info.filename,
+                    "dest": dest,
+                })
+            elif name.lower().endswith(".mp3"):
+                jobs.append({
+                    "kind": "zip-mp3",
                     "label": name,
                     "zip_path": zip_path,
                     "member": info.filename,
@@ -512,23 +639,61 @@ def _ffprobe_beside(ffmpeg):
     return shutil.which("ffprobe")
 
 
-def _apply_flac_name(job, source_path, ffprobe, used_destinations, output_root):
-    """Point a FLAC job at NN. Title.flac when both tags are present."""
-    filename = _flac_name_from_tags(source_path, ffprobe)
+def _apply_flac_name(job, source_path, ffprobe, used_destinations, output_root, jobs):
+    """Point an audio job at NN. Title.ext when both tags are present."""
+    extension = os.path.splitext(job["dest"])[1] or ".flac"
+    filename = _flac_name_from_tags(source_path, ffprobe, extension)
     if not filename:
         return
-    new_dest = _unique_dest(os.path.dirname(job["dest"]), filename, used_destinations, job["dest"])
-    old_key = os.path.normcase(job["dest"])
+    if not filename:
+        return
+    old_dest = job["dest"]
+    new_dest = _unique_dest(os.path.dirname(old_dest), filename, used_destinations, old_dest)
+    old_key = os.path.normcase(old_dest)
     new_key = os.path.normcase(new_dest)
     if new_key == old_key:
         return
     used_destinations.discard(old_key)
     used_destinations.add(new_key)
     job["dest"] = new_dest
+    _set_job_label(job, new_dest, output_root)
+    _retarget_matching_lyrics(jobs, old_dest, new_dest, used_destinations, output_root)
+
+
+def _retarget_matching_lyrics(jobs, old_flac_dest, new_flac_dest, used_destinations, output_root):
+    """Rename a sidecar .lrc that shares the FLAC's original base name."""
+    directory = os.path.dirname(old_flac_dest)
+    old_stem = os.path.splitext(os.path.basename(old_flac_dest))[0]
+    new_stem = os.path.splitext(os.path.basename(new_flac_dest))[0]
+    if os.path.normcase(old_stem) == os.path.normcase(new_stem):
+        return
+    for job in jobs:
+        if job.get("kind") not in ("copy", "zip-copy"):
+            continue
+        dest = job.get("dest") or ""
+        if os.path.normcase(os.path.dirname(dest)) != os.path.normcase(directory):
+            continue
+        stem, ext = os.path.splitext(os.path.basename(dest))
+        if ext.lower() != ".lrc" or os.path.normcase(stem) != os.path.normcase(old_stem):
+            continue
+        new_dest = _unique_dest(os.path.dirname(dest), new_stem + ext, used_destinations, dest)
+        old_key = os.path.normcase(dest)
+        new_key = os.path.normcase(new_dest)
+        if new_key == old_key:
+            continue
+        if job.get("written") and os.path.isfile(dest):
+            os.replace(dest, new_dest)
+        used_destinations.discard(old_key)
+        used_destinations.add(new_key)
+        job["dest"] = new_dest
+        _set_job_label(job, new_dest, output_root)
+
+
+def _set_job_label(job, dest, output_root):
     try:
-        job["label"] = os.path.relpath(new_dest, output_root)
+        job["label"] = os.path.relpath(dest, output_root)
     except ValueError:
-        job["label"] = os.path.basename(new_dest)
+        job["label"] = os.path.basename(dest)
 
 
 def _unique_dest(directory, filename, used_destinations, current):
@@ -544,7 +709,7 @@ def _unique_dest(directory, filename, used_destinations, current):
         number += 1
 
 
-def _flac_name_from_tags(path, ffprobe):
+def _flac_name_from_tags(path, ffprobe, extension):
     if not ffprobe:
         return None
     command = [
@@ -579,7 +744,7 @@ def _flac_name_from_tags(path, ffprobe):
     title = _clean_track_title(folded.get("title") or "")
     if number is None or not title:
         return None
-    return "%02d. %s.flac" % (number, title)
+    return "%02d. %s%s" % (number, title, extension)
 
 
 def _parse_track_number(value):
@@ -780,6 +945,176 @@ def _artist_metadata_args(path, ffmpeg):
     return arguments
 
 
+_LAME_BITRATES = (8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320)
+_AUDIO_BITRATE_RE = re.compile(r"Audio:.*\b(\d+)\s*kb/s", re.IGNORECASE)
+_FORMAT_BITRATE_RE = re.compile(r"bitrate:\s*(\d+)\s*kb/s", re.IGNORECASE)
+
+
+def _convert_audio_job(
+    job,
+    source_path,
+    ffmpeg,
+    ffprobe,
+    used_destinations,
+    output_root,
+    jobs,
+    cancel_event,
+    rename_flacs,
+    normalize_artists,
+    output_format,
+):
+    """Convert one FLAC or MP3. MP3 sources are never written as FLAC."""
+    is_mp3 = job["kind"] in ("mp3", "zip-mp3")
+    if is_mp3 or output_format == "mp3":
+        _set_dest_extension(job, ".mp3", used_destinations, output_root)
+    if rename_flacs:
+        _apply_flac_name(job, source_path, ffprobe, used_destinations, output_root, jobs)
+    os.makedirs(os.path.dirname(job["dest"]), exist_ok=True)
+    metadata = _artist_metadata_args(source_path, ffmpeg) if normalize_artists else None
+    if is_mp3 or output_format == "mp3":
+        if is_mp3:
+            bitrate = _capped_mp3_bitrate(_source_bitrate_kbps(source_path, ffmpeg, ffprobe))
+            sample_rate = None
+        else:
+            bitrate = 320
+            sample_rate = 44100
+        _convert_mp3(ffmpeg, source_path, job["dest"], cancel_event, bitrate, sample_rate, metadata)
+    else:
+        _convert_flac(ffmpeg, source_path, job["dest"], cancel_event, metadata)
+
+
+def _set_dest_extension(job, extension, used_destinations, output_root):
+    directory = os.path.dirname(job["dest"])
+    stem, current = os.path.splitext(os.path.basename(job["dest"]))
+    if current.lower() == extension.lower():
+        if current != extension:
+            job["dest"] = os.path.join(directory, stem + extension)
+            _set_job_label(job, job["dest"], output_root)
+        return
+    new_dest = _unique_dest(directory, stem + extension, used_destinations, job["dest"])
+    old_key = os.path.normcase(job["dest"])
+    new_key = os.path.normcase(new_dest)
+    if new_key != old_key:
+        used_destinations.discard(old_key)
+        used_destinations.add(new_key)
+    job["dest"] = new_dest
+    _set_job_label(job, new_dest, output_root)
+
+
+def _capped_mp3_bitrate(kbps):
+    """Highest standard MP3 rate that does not exceed the source or 320 kbps."""
+    if not kbps or kbps <= 0:
+        return 320
+    limit = min(int(kbps), 320)
+    chosen = _LAME_BITRATES[0]
+    for rate in _LAME_BITRATES:
+        if rate <= limit:
+            chosen = rate
+        else:
+            break
+    return chosen
+
+
+def _source_bitrate_kbps(path, ffmpeg, ffprobe):
+    if ffprobe:
+        bitrate = _ffprobe_bitrate_kbps(path, ffprobe)
+        if bitrate:
+            return bitrate
+    return _ffmpeg_bitrate_kbps(path, ffmpeg)
+
+
+def _ffprobe_bitrate_kbps(path, ffprobe):
+    command = [
+        ffprobe,
+        "-v",
+        "error",
+        "-show_entries",
+        "format=bit_rate:stream=bit_rate,codec_type",
+        "-of",
+        "json",
+        path,
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            creationflags=CREATE_NO_WINDOW,
+            check=False,
+        )
+    except OSError:
+        return None
+    if completed.returncode != 0:
+        return None
+    try:
+        payload = json.loads(completed.stdout.decode("utf-8", errors="replace") or "{}")
+    except json.JSONDecodeError:
+        return None
+    format_rate = _kbps_from_bps((payload.get("format") or {}).get("bit_rate"))
+    if format_rate:
+        return format_rate
+    for stream in payload.get("streams") or []:
+        if stream.get("codec_type") not in (None, "audio"):
+            continue
+        rate = _kbps_from_bps(stream.get("bit_rate"))
+        if rate:
+            return rate
+    return None
+
+
+def _kbps_from_bps(value):
+    try:
+        bps = float(value)
+    except (TypeError, ValueError):
+        return None
+    if bps <= 0:
+        return None
+    return int(round(bps / 1000.0))
+
+
+def _ffmpeg_bitrate_kbps(path, ffmpeg):
+    command = [ffmpeg, "-hide_banner", "-i", path]
+    try:
+        completed = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            creationflags=CREATE_NO_WINDOW,
+            check=False,
+        )
+    except OSError:
+        return None
+    text = completed.stderr.decode("utf-8", errors="replace")
+    match = _AUDIO_BITRATE_RE.search(text) or _FORMAT_BITRATE_RE.search(text)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def _convert_mp3(ffmpeg, infile, outfile, cancel_event, bitrate_kbps, sample_rate, metadata_args=None):
+    command = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        infile,
+        "-map_metadata",
+        "0",
+        "-c:a",
+        "libmp3lame",
+        "-b:a",
+        "%dk" % bitrate_kbps,
+    ]
+    if sample_rate:
+        command.extend(["-ar", str(sample_rate)])
+    if metadata_args:
+        command.extend(metadata_args)
+    command.extend(["-id3v2_version", "3", outfile])
+    _run_ffmpeg(command, cancel_event)
+
+
 def _convert_flac(ffmpeg, infile, outfile, cancel_event, metadata_args=None):
     # Same flags as the shell script. -y avoids an overwrite prompt on a re-run.
     command = [
@@ -802,6 +1137,10 @@ def _convert_flac(ffmpeg, infile, outfile, cancel_event, metadata_args=None):
     if metadata_args:
         command.extend(metadata_args)
     command.append(outfile)
+    _run_ffmpeg(command, cancel_event)
+
+
+def _run_ffmpeg(command, cancel_event):
     process = subprocess.Popen(
         command,
         stdout=subprocess.PIPE,
@@ -835,9 +1174,10 @@ class App:
             self.root = tk.Tk()
 
         self.root.title("Audio Optimizer")
-        self.root.geometry("680x660")
+        self.root.geometry("680x700")
         self.root.minsize(560, 560)
         self.root.configure(bg="white")
+        self._set_window_icon()
 
         self._events = queue.Queue()
         self._pending = deque()
@@ -849,6 +1189,7 @@ class App:
         self._ffmpeg = None
         self._destination = None
         self._drag_over = False
+        self._output_format = "flac"
 
         self._build()
         self.root.after(100, self._poll)
@@ -857,12 +1198,28 @@ class App:
         if initial:
             self.root.after(200, lambda: self.enqueue(initial))
 
+    def _set_window_icon(self):
+        base = _app_dir()
+        ico = os.path.join(base, "icon.ico")
+        png = os.path.join(base, "icon.png")
+        if os.path.isfile(ico):
+            try:
+                self.root.iconbitmap(default=ico)
+            except tk.TclError:
+                pass
+        if os.path.isfile(png):
+            try:
+                self._icon_image = tk.PhotoImage(file=png)
+                self.root.iconphoto(True, self._icon_image)
+            except tk.TclError:
+                self._icon_image = None
+
     def _build(self):
         header = tk.Frame(self.root, bg="white")
         header.pack(fill="x", padx=20, pady=(16, 4))
         tk.Label(
             header,
-            text="FLAC to CD quality",
+            text="CD quality or 320 kbps",
             font=("Segoe UI", 16, "bold"),
             bg="white",
             fg="#0f172a",
@@ -871,8 +1228,9 @@ class App:
         tk.Label(
             header,
             text=(
-                "Drop folders or zips. FLACs become 44.1 kHz / 16-bit. cover.jpg can be resized to 600×600.\n"
-                "They convert one at a time. Results go in a new folder ending in _optimized."
+                "Drop folders or zips. Choose CD-quality FLAC or 320 kbps MP3.\n"
+                "They convert one at a time. cover.jpg can be resized to 600×600.\n"
+                "Results go in originalName_optimized / year - album name."
             ),
             font=("Segoe UI", 9),
             bg="white",
@@ -880,6 +1238,17 @@ class App:
             justify="left",
             anchor="w",
         ).pack(fill="x", pady=(4, 0))
+
+        buttons = tk.Frame(self.root, bg="white")
+        buttons.pack(fill="x", padx=20, pady=(12, 4))
+        self.choose_button = tk.Button(buttons, text="Choose folder", command=self.choose_folder)
+        self.choose_button.pack(side="left")
+        self.cancel_button = tk.Button(buttons, text="Cancel", command=self.cancel, state="disabled")
+        self.cancel_button.pack(side="left", padx=(8, 0))
+        self.open_button = tk.Button(
+            buttons, text="Open output folder", command=self.open_destination, state="disabled"
+        )
+        self.open_button.pack(side="left", padx=(8, 0))
 
         self.drop = tk.Frame(
             self.root,
@@ -889,7 +1258,7 @@ class App:
             height=120,
             cursor="hand2",
         )
-        self.drop.pack(fill="x", padx=20, pady=(12, 4))
+        self.drop.pack(fill="x", padx=20, pady=(0, 4))
         self.drop.pack_propagate(False)
         self.drop_label = tk.Label(
             self.drop,
@@ -938,18 +1307,23 @@ class App:
         queue_scroll.pack(side="right", fill="y")
         self.queue_list.pack(side="left", fill="x", expand=True)
 
-        buttons = tk.Frame(self.root, bg="white")
-        buttons.pack(fill="x", padx=20, pady=(8, 4))
-        self.choose_button = tk.Button(buttons, text="Choose folder", command=self.choose_folder)
-        self.choose_button.pack(side="left")
-        self.zip_button = tk.Button(buttons, text="Choose zip", command=self.choose_zip)
-        self.zip_button.pack(side="left", padx=(8, 0))
-        self.cancel_button = tk.Button(buttons, text="Cancel", command=self.cancel, state="disabled")
-        self.cancel_button.pack(side="left", padx=(8, 0))
-        self.open_button = tk.Button(
-            buttons, text="Open output folder", command=self.open_destination, state="disabled"
-        )
-        self.open_button.pack(side="left", padx=(8, 0))
+        formats = tk.Frame(self.root, bg="white")
+        formats.pack(fill="x", padx=20, pady=(8, 0))
+        self.format_var = tk.StringVar(value="flac")
+        self.format_var.trace_add("write", self._on_format_toggle)
+        for text, value in (
+            ("CD Quality FLAC (44/16)", "flac"),
+            ("High Quality MP3 (320kbs)", "mp3"),
+        ):
+            tk.Radiobutton(
+                formats,
+                text=text,
+                variable=self.format_var,
+                value=value,
+                bg="white",
+                activebackground="white",
+                font=("Segoe UI", 9),
+            ).pack(side="left", padx=(0, 12))
 
         options = tk.Frame(self.root, bg="white")
         options.pack(fill="x", padx=20, pady=(0, 4))
@@ -1015,14 +1389,6 @@ class App:
         folder = filedialog.askdirectory(title="Choose a folder to convert")
         if folder:
             self.enqueue([folder])
-
-    def choose_zip(self):
-        path = filedialog.askopenfilename(
-            title="Choose a zip to convert",
-            filetypes=[("Zip archives", "*.zip"), ("All files", "*.*")],
-        )
-        if path:
-            self.enqueue([path])
 
     def enqueue(self, paths):
         sources = []
@@ -1099,12 +1465,16 @@ class App:
                     optimize_covers=self._optimize_covers,
                     rename_flacs=self._rename_flacs,
                     normalize_artists=self._normalize_artists,
+                    output_format=self._output_format,
                 )
                 self._events.put(("result", result))
             except Cancelled:
                 self._events.put(("cancelled", source))
             except Exception as exc:
                 self._events.put(("error", str(exc)))
+
+    def _on_format_toggle(self, *_args):
+        self._output_format = self.format_var.get()
 
     def _on_cover_toggle(self, *_args):
         self._optimize_covers = bool(self.cover_var.get())
@@ -1184,7 +1554,7 @@ class App:
                     if result["total"] == 0:
                         summary = "No files found."
                     else:
-                        summary = "Done. %s FLAC converted, %s covers optimized, %s copied, %s failed." % (
+                        summary = "Done. %s converted, %s covers optimized, %s copied, %s failed." % (
                             result["converted"],
                             result["covers"],
                             result["copied"],

@@ -1,8 +1,9 @@
 # Audio Optimizer
 
-Drop folders or zip files onto the window. They are converted one at a time into a new folder named `originalName_optimized`. Originals are not changed.
+Drop folders or zip files onto the window. They are converted one at a time into `originalName_optimized`. Inside that folder, files are placed in `year - album name` using the first song that has both an album name and a release year. If no song has those tags, the inner folder keeps the original folder name. Originals are not changed.
 
-- FLAC files become 44.1 kHz / 16-bit FLAC, including files in subfolders and inside zip archives. When **Normalize file names** is checked (the default), each file is saved as `01. Track Title.flac` using the track number and title. A file keeps its original name when either tag is missing.
+- Choose **CD Quality FLAC (44/16)** (the default) or **High Quality MP3 (320kbs)**. FLAC sources become 44.1 kHz / 16-bit FLAC, or 320 kbps MP3 when that option is selected. An MP3 source is always written as MP3 and is never converted to FLAC. Its bitrate stays at the highest standard rate that does not exceed the source, up to 320 kbps.
+- Files in subfolders and zip archives are included. When **Normalize file names** is checked (the default), each audio file is saved as `01. Track Title` plus `.flac` or `.mp3`, using the track number and title. A `.lrc` file with the same name is renamed to match. A file keeps its original name when either tag is missing.
 - When **Normalize artist tags** is checked (the default), multi-artist tags such as `Artist1;Artist2`, `Artist1\Artist2`, or `Artist1, Artist2` are rewritten as `Artist1; Artist2`.
 - When **Optimize cover photo** is checked (the default), `cover.jpg` is resized to fit within 600×600 and saved as a baseline (non-progressive) JPEG. Uncheck it to copy covers unchanged.
 - Every other file is copied.
@@ -18,7 +19,7 @@ From this folder:
 ```powershell
 py -3.9 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\pyinstaller.exe --noconfirm --clean --onefile --windowed --name AudioOptimizer --collect-all tkinterdnd2 audio_optimizer.py
+.\.venv\Scripts\pyinstaller.exe --noconfirm --clean --onefile --windowed --name AudioOptimizer --icon icon.ico --add-data "icon.png;." --add-data "icon.ico;." --collect-all tkinterdnd2 audio_optimizer.py
 ```
 
 The program is written to `dist\AudioOptimizer.exe`.
