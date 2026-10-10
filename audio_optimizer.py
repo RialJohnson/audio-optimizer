@@ -28,6 +28,21 @@ except ImportError:  # Drag-and-drop is optional so the window still opens.
 _SUBPROCESS_KWARGS = {"creationflags": 0x08000000} if sys.platform == "win32" else {}
 COVER_MAX_EDGE = 600
 
+# Dark UI palette
+_BG = "#0b1220"
+_SURFACE = "#151d2e"
+_PANEL = "#1a2438"
+_BORDER = "#2a364d"
+_BORDER_ACTIVE = "#3b82f6"
+_TEXT = "#e8eef9"
+_TEXT_MUTED = "#94a3b8"
+_ACCENT = "#3b82f6"
+_DROP_HOVER = "#1e2a44"
+_OK = "#4ade80"
+_BAD = "#f87171"
+_BUTTON_BG = "#243149"
+_BUTTON_FG = "#e8eef9"
+
 
 class Cancelled(Exception):
     pass
@@ -1191,7 +1206,7 @@ class App:
         self.root.title("Audio Optimizer")
         self.root.geometry("680x700")
         self.root.minsize(560, 560)
-        self.root.configure(bg="white")
+        self.root.configure(bg=_BG)
         self._set_window_icon()
 
         self._events = queue.Queue()
@@ -1229,15 +1244,57 @@ class App:
             except tk.TclError:
                 self._icon_image = None
 
+    def _button(self, parent, **kwargs):
+        defaults = {
+            "bg": _BUTTON_BG,
+            "fg": _BUTTON_FG,
+            "activebackground": _PANEL,
+            "activeforeground": _TEXT,
+            "disabledforeground": "#64748b",
+            "relief": "flat",
+            "bd": 0,
+            "padx": 10,
+            "pady": 4,
+            "font": ("Segoe UI", 9),
+            "cursor": "hand2",
+        }
+        defaults.update(kwargs)
+        return tk.Button(parent, **defaults)
+
     def _build(self):
-        header = tk.Frame(self.root, bg="white")
+        style = ttk.Style(self.root)
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+        style.configure(
+            "TProgressbar",
+            troughcolor=_SURFACE,
+            background=_ACCENT,
+            bordercolor=_SURFACE,
+            lightcolor=_ACCENT,
+            darkcolor=_ACCENT,
+        )
+        style.configure(
+            "Vertical.TScrollbar",
+            troughcolor=_SURFACE,
+            background=_BUTTON_BG,
+            bordercolor=_SURFACE,
+            arrowcolor=_TEXT_MUTED,
+        )
+        style.map(
+            "Vertical.TScrollbar",
+            background=[("active", _PANEL)],
+        )
+
+        header = tk.Frame(self.root, bg=_BG)
         header.pack(fill="x", padx=20, pady=(16, 4))
         tk.Label(
             header,
             text="CD quality or 320 kbps",
             font=("Segoe UI", 16, "bold"),
-            bg="white",
-            fg="#0f172a",
+            bg=_BG,
+            fg=_TEXT,
             anchor="w",
         ).pack(fill="x")
         tk.Label(
@@ -1248,28 +1305,28 @@ class App:
                 "Results go in originalName_optimized / year - album name."
             ),
             font=("Segoe UI", 9),
-            bg="white",
-            fg="#475569",
+            bg=_BG,
+            fg=_TEXT_MUTED,
             justify="left",
             anchor="w",
         ).pack(fill="x", pady=(4, 0))
 
-        buttons = tk.Frame(self.root, bg="white")
+        buttons = tk.Frame(self.root, bg=_BG)
         buttons.pack(fill="x", padx=20, pady=(12, 4))
-        self.choose_button = tk.Button(buttons, text="Choose folder", command=self.choose_folder)
+        self.choose_button = self._button(buttons, text="Choose folder", command=self.choose_folder)
         self.choose_button.pack(side="left")
-        self.cancel_button = tk.Button(buttons, text="Cancel", command=self.cancel, state="disabled")
+        self.cancel_button = self._button(buttons, text="Cancel", command=self.cancel, state="disabled")
         self.cancel_button.pack(side="left", padx=(8, 0))
-        self.open_button = tk.Button(
+        self.open_button = self._button(
             buttons, text="Open output folder", command=self.open_destination, state="disabled"
         )
         self.open_button.pack(side="left", padx=(8, 0))
 
         self.drop = tk.Frame(
             self.root,
-            bg="#f8fafc",
+            bg=_PANEL,
             highlightthickness=2,
-            highlightbackground="#cbd5e1",
+            highlightbackground=_BORDER,
             height=120,
             cursor="hand2",
         )
@@ -1279,8 +1336,8 @@ class App:
             self.drop,
             text="Drop folders or zips here\nThey convert one at a time",
             font=("Segoe UI", 12, "bold"),
-            bg="#f8fafc",
-            fg="#0f172a",
+            bg=_PANEL,
+            fg=_TEXT,
             cursor="hand2",
         )
         self.drop_label.place(relx=0.5, rely=0.5, anchor="center")
@@ -1294,27 +1351,29 @@ class App:
                 widget.dnd_bind("<<DragLeave>>", self._drag_leave)
                 widget.dnd_bind("<<Drop>>", self._on_drop)
 
-        queue_host = tk.Frame(self.root, bg="white")
+        queue_host = tk.Frame(self.root, bg=_BG)
         queue_host.pack(fill="x", padx=20, pady=(8, 0))
         tk.Label(
             queue_host,
             text="Queue",
             font=("Segoe UI", 9, "bold"),
-            bg="white",
-            fg="#334155",
+            bg=_BG,
+            fg=_TEXT_MUTED,
             anchor="w",
         ).pack(fill="x")
-        queue_row = tk.Frame(queue_host, bg="white")
+        queue_row = tk.Frame(queue_host, bg=_BG)
         queue_row.pack(fill="x", pady=(2, 0))
         self.queue_list = tk.Listbox(
             queue_row,
             height=4,
             font=("Segoe UI", 9),
-            bg="#f8fafc",
-            fg="#0f172a",
+            bg=_PANEL,
+            fg=_TEXT,
             relief="flat",
             highlightthickness=1,
-            highlightbackground="#e2e8f0",
+            highlightbackground=_BORDER,
+            selectbackground=_ACCENT,
+            selectforeground=_TEXT,
             activestyle="none",
         )
         queue_scroll = ttk.Scrollbar(queue_row, command=self.queue_list.yview)
@@ -1322,7 +1381,7 @@ class App:
         queue_scroll.pack(side="right", fill="y")
         self.queue_list.pack(side="left", fill="x", expand=True)
 
-        formats = tk.Frame(self.root, bg="white")
+        formats = tk.Frame(self.root, bg=_BG)
         formats.pack(fill="x", padx=20, pady=(8, 0))
         self.format_var = tk.StringVar(value="flac")
         self.format_var.trace_add("write", self._on_format_toggle)
@@ -1335,12 +1394,15 @@ class App:
                 text=text,
                 variable=self.format_var,
                 value=value,
-                bg="white",
-                activebackground="white",
+                bg=_BG,
+                fg=_TEXT,
+                activebackground=_BG,
+                activeforeground=_TEXT,
+                selectcolor=_SURFACE,
                 font=("Segoe UI", 9),
             ).pack(side="left", padx=(0, 12))
 
-        options = tk.Frame(self.root, bg="white")
+        options = tk.Frame(self.root, bg=_BG)
         options.pack(fill="x", padx=20, pady=(0, 4))
         self.cover_var = tk.BooleanVar(value=True)
         self._optimize_covers = True
@@ -1360,8 +1422,11 @@ class App:
                 options,
                 text=text,
                 variable=variable,
-                bg="white",
-                activebackground="white",
+                bg=_BG,
+                fg=_TEXT,
+                activebackground=_BG,
+                activeforeground=_TEXT,
+                selectcolor=_SURFACE,
                 font=("Segoe UI", 9),
             ).pack(side="left", padx=(0, 12))
 
@@ -1372,21 +1437,22 @@ class App:
             self.root,
             text="Waiting for a folder or a zip." if DND_FILES is not None else "Choose a folder or a zip to begin.",
             font=("Segoe UI", 9),
-            bg="white",
-            fg="#334155",
+            bg=_BG,
+            fg=_TEXT_MUTED,
             anchor="w",
         )
         self.status.pack(fill="x", padx=20, pady=(8, 0))
 
-        log_host = tk.Frame(self.root, bg="white")
+        log_host = tk.Frame(self.root, bg=_BG)
         log_host.pack(fill="both", expand=True, padx=20, pady=(4, 16))
         self.log = tk.Text(
             log_host,
             height=10,
             wrap="word",
             font=("Consolas", 9),
-            bg="#f8fafc",
-            fg="#0f172a",
+            bg=_PANEL,
+            fg=_TEXT,
+            insertbackground=_TEXT,
             relief="flat",
             state="disabled",
         )
@@ -1394,8 +1460,8 @@ class App:
         self.log.configure(yscrollcommand=scroll.set)
         scroll.pack(side="right", fill="y")
         self.log.pack(side="left", fill="both", expand=True)
-        self.log.tag_configure("size-down", foreground="#15803d")
-        self.log.tag_configure("size-up", foreground="#b91c1c")
+        self.log.tag_configure("size-down", foreground=_OK)
+        self.log.tag_configure("size-up", foreground=_BAD)
 
     def mainloop(self):
         self.root.mainloop()
@@ -1538,8 +1604,8 @@ class App:
         if active == self._drag_over:
             return
         self._drag_over = active
-        bg = "#eff6ff" if active else "#f8fafc"
-        border = "#2563eb" if active else "#cbd5e1"
+        bg = _DROP_HOVER if active else _PANEL
+        border = _BORDER_ACTIVE if active else _BORDER
         self.drop.configure(bg=bg, highlightbackground=border)
         self.drop_label.configure(bg=bg)
 
